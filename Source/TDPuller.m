@@ -138,8 +138,8 @@ static NSString* joinQuotedEscaped(NSArray* strings);
                     [self addToInbox: rev];
                     [rev release];
                 }
-                self.changesTotal += changes.count;
             }
+            self.changesTotal += changes.count;
         } else {
             Warn(@"%@: Received invalid doc ID from _changes: %@", self, change);
         }
@@ -284,6 +284,7 @@ static NSString* joinQuotedEscaped(NSArray* strings);
     NSString* urlStr = [_remote.absoluteString stringByAppendingString: path];
     [[[TDMultipartDownloader alloc] initWithURL: [NSURL URLWithString: urlStr]
                                        database: _db
+                                     authorizer: _authorizer
                                    onCompletion:
         ^(TDMultipartDownloader* download, NSError *error) {
             // OK, now we've got the response revision:
@@ -326,6 +327,7 @@ static NSString* joinQuotedEscaped(NSArray* strings);
               onCompletion:^(id result, NSError *error) {
                   if (error) {
                       self.error = error;
+                      self.changesProcessed += bulkRevs.count;
                   } else {
                       // Process the resulting rows' documents.
                       // We only add a document if it doesn't have attachments, and if its
@@ -381,7 +383,7 @@ static NSString* joinQuotedEscaped(NSArray* strings);
                 NSArray* history = [TDDatabase parseCouchDBRevisionHistory: rev.properties];
                 if (!history && rev.generation > 1) {
                     Warn(@"%@: Missing revision history in response for %@", self, rev);
-                    self.error = TDHTTPError(502, nil);
+                    self.error = TDStatusToNSError(kTDStatusUpstreamError, nil);
                     continue;
                 }
                 LogTo(SyncVerbose, @"%@ inserting %@ %@",
@@ -389,12 +391,12 @@ static NSString* joinQuotedEscaped(NSArray* strings);
 
                 // Insert the revision:
                 int status = [_db forceInsert: rev revisionHistory: history source: _remote];
-                if (status >= 300) {
-                    if (status == 403)
+                if (TDStatusIsError(status)) {
+                    if (status == kTDStatusForbidden)
                         LogTo(Sync, @"%@: Remote rev failed validation: %@", self, rev);
                     else {
                         Warn(@"%@ failed to write %@: status=%d", self, rev, status);
-                        self.error = TDHTTPError(status, nil);
+                        self.error = TDStatusToNSError(status, nil);
                         continue;
                     }
                 }

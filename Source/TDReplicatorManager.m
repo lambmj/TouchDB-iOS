@@ -5,6 +5,14 @@
 //  Created by Jens Alfke on 2/15/12.
 //  Copyright (c) 2012 Couchbase, Inc. All rights reserved.
 //
+//  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file
+//  except in compliance with the License. You may obtain a copy of the License at
+//    http://www.apache.org/licenses/LICENSE-2.0
+//  Unless required by applicable law or agreed to in writing, software distributed under the
+//  License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+//  either express or implied. See the License for the specific language governing permissions
+//  and limitations under the License.
+//
 //  http://wiki.apache.org/couchdb/Replication#Replicator_database
 //  http://www.couchbase.com/docs/couchdb-release-1.1/index.html
 
@@ -79,7 +87,7 @@ NSString* const kTDReplicatorDatabaseName = @"_replicator";
     *outCreateTarget = [$castIf(NSNumber, [properties objectForKey: @"create_target"]) boolValue];
     
     if (!source || !target)
-        return 400;
+        return kTDStatusBadRequest;
     *outIsPush = NO;
     TDDatabase* db = nil;
     NSString* remoteStr;
@@ -90,13 +98,13 @@ NSString* const kTDReplicatorDatabaseName = @"_replicator";
         *outIsPush = YES;
     } else {
         if (![TDDatabaseManager isValidDatabaseName: target])
-            return 400;
+            return kTDStatusBadID;
         remoteStr = source;
         if (outDatabase) {
             if (*outCreateTarget) {
                 db = [_dbManager databaseNamed: target];
                 if (![db open])
-                    return 500;
+                    return kTDStatusDBError;
             } else {
                 db = [_dbManager existingDatabaseNamed: target];
             }
@@ -104,15 +112,15 @@ NSString* const kTDReplicatorDatabaseName = @"_replicator";
     }
     NSURL* remote = [NSURL URLWithString: remoteStr];
     if (!remote || ![remote.scheme hasPrefix: @"http"])
-        return 400;
+        return kTDStatusBadRequest;
     if (outDatabase) {
         *outDatabase = db;
         if (!db)
-            return 404;
+            return kTDStatusNotFound;
     }
     if (outRemote)
         *outRemote = remote;
-    return 200;
+    return kTDStatusOK;
 }
 
 
@@ -176,7 +184,7 @@ NSString* const kTDReplicatorDatabaseName = @"_replicator";
         NSMutableDictionary* updatedProperties = [[currentProperties mutableCopy] autorelease];
         [updatedProperties addEntriesFromDictionary: updates];
         if ($equal(updatedProperties, currentProperties)) {
-            status = 200;     // this is a no-op change
+            status = kTDStatusOK;     // this is a no-op change
             break;
         }
         TDRevision* updatedRev = [TDRevision revisionWithProperties: updatedProperties];
@@ -190,16 +198,16 @@ NSString* const kTDReplicatorDatabaseName = @"_replicator";
             _updateInProgress = NO;
         }
         
-        if (status == 409) {
+        if (status == kTDStatusConflict) {
             // Conflict -- doc has been updated, get the latest revision & try again:
             currentRev = [_replicatorDB getDocumentWithID: currentRev.docID
                                                revisionID: nil options: 0];
             if (!currentRev)
-                status = 404;   // doc's been deleted, apparently
+                status = kTDStatusNotFound;   // doc's been deleted, apparently
         }
-    } while (status == 409);
+    } while (status == kTDStatusConflict);
     
-    if (status >= 300)
+    if (TDStatusIsError(status))
         Warn(@"TDReplicatorManager: Error %d updating _replicator doc %@", status, currentRev);
     return status;
 }
@@ -234,7 +242,7 @@ NSString* const kTDReplicatorDatabaseName = @"_replicator";
                                            toDatabase: &localDb remote: &remote
                                                isPush: &push
                                          createTarget: &createTarget];
-    if (status >= 300) {
+    if (TDStatusIsError(status)) {
         Warn(@"TDReplicatorManager: Can't find replication endpoints for %@", properties);
         return;
     }
