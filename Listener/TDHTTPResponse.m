@@ -47,6 +47,15 @@
         router.onFinished = ^{
             [self onFinished];
         };
+
+        if (connection.listener.readOnly) {
+            router.onAccessCheck = ^TDStatus(TDDatabase* db, NSString* docID, SEL action) {
+                NSString* method = router.request.HTTPMethod;
+                if (![method isEqualToString: @"GET"] && ![method isEqualToString: @"HEAD"])
+                    return kTDStatusForbidden;
+                return kTDStatusOK;
+            };
+        }
         
         // Run the router, synchronously:
         LogTo(TDListenerVerbose, @"%@: Starting...", self);
@@ -188,9 +197,7 @@
         _router.onDataAvailable = nil;
         _router.onFinished = nil;
 
-        if (_chunked && _offset > 0) {
-            [_connection responseHasAvailableData: self];
-        } else {
+        if (!_chunked || _offset == 0) {
             // Response finished immediately, before the connection asked for any data, so we're free
             // to massage the response:
             LogTo(TDListenerVerbose, @"%@ prettifying response body", self);
@@ -204,6 +211,7 @@
                 _data = [_response.body.asPrettyJSON mutableCopy];
             }
         }
+        [_connection responseHasAvailableData: self];
     }
 }
 

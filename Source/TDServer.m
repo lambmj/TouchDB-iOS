@@ -14,8 +14,12 @@
 //  and limitations under the License.
 
 #import "TDServer.h"
+#import <TouchDB/TDDatabase.h>
+#import "TDReplicatorManager.h"
+#import "TDMisc.h"
 #import "TDDatabaseManager.h"
 #import "TDInternal.h"
+#import "TDURLProtocol.h"
 #import "MYBlockUtils.h"
 
 
@@ -24,7 +28,7 @@
 
 #if DEBUG
 + (TDServer*) createEmptyAtPath: (NSString*)path {
-    [[NSFileManager defaultManager] removeItemAtPath: path error: nil];
+    [[NSFileManager defaultManager] removeItemAtPath: path error: NULL];
     NSError* error;
     TDServer* server = [[self alloc] initWithDirectory: path error: &error];
     Assert(server, @"Failed to create server at %@: %@", path, error);
@@ -60,6 +64,7 @@
 
 - (void)dealloc
 {
+    LogTo(TDServer, @"DEALLOC");
     if (_serverThread) Warn(@"%@ dealloced with _serverThread still set: %@", self, _serverThread);
     [_manager release];
     [super dealloc];
@@ -70,7 +75,8 @@
     if (_serverThread) {
         [self queue: ^{
             LogTo(TDServer, @"Stopping server thread...");
-            CFRunLoopStop(CFRunLoopGetCurrent());
+            [TDURLProtocol unregisterServer: self];
+            _stopRunLoop = YES;
         }];
         [_serverThread release];
         _serverThread = nil;
@@ -92,18 +98,22 @@
 
             [[NSThread currentThread] setName:@"TouchDB"];
             
+#ifndef GNUSTEP
             // Add a no-op source so the runloop won't stop on its own:
             CFRunLoopSourceContext context = {};  // all zeros
             CFRunLoopSourceRef source = CFRunLoopSourceCreate(NULL, 0, &context);
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
             CFRelease(source);
+#endif
             
             // Initialize the replicator:
             [_manager replicatorManager];
         }
         
         // Now run:
-        [[NSRunLoop currentRunLoop] run];
+        while (!_stopRunLoop && [[NSRunLoop currentRunLoop] runMode: NSDefaultRunLoopMode
+                                                         beforeDate: [NSDate distantFuture]])
+            ;
         
         LogTo(TDServer, @"Server thread exiting");
 

@@ -95,7 +95,9 @@ static NSString* normalizeHostname( NSString* hostname ) {
 
 
 + (void) unregisterServer: (TDServer*)server {
-    [sHostMap removeObjectsForKeys: [sHostMap allKeysForObject: server]];
+    @synchronized(self) {
+        [sHostMap removeObjectsForKeys: [sHostMap allKeysForObject: server]];
+    }
 }
 
 
@@ -262,7 +264,8 @@ TestCase(TDURLProtocol) {
     CAssert(response != nil);
     CAssertEq(response.statusCode, kTDStatusOK);
     CAssertEqual([response.allHeaderFields objectForKey: @"Content-Type"], @"application/json");
-    CAssert([bodyStr rangeOfString: @"\"TouchDB\":\"Welcome\""].length > 0);
+    CAssert([bodyStr rangeOfString: @"\"TouchDB\":\"Welcome\""].length > 0
+            || [bodyStr rangeOfString: @"\"TouchDB\": \"Welcome\""].length > 0);
     [server close];
     [TDURLProtocol setServer: nil];
 }

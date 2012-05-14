@@ -22,10 +22,19 @@
 #import "TDReplicatorManager.h"
 #import "TDInternal.h"
 #import "ExceptionUtils.h"
+
+#ifdef GNUSTEP
+#import <GNUstepBase/NSURL+GNUstepBase.h>
+#else
 #import <objc/message.h>
+#endif
 
 
-extern double TouchDBVersionNumber; // Defined in generated TouchDB_vers.c
+#ifdef GNUSTEP
+static double TouchDBVersionNumber = 0.7;
+#else
+extern double TouchDBVersionNumber; // Defined in Xcode-generated TouchDB_vers.c
+#endif
 
 
 @implementation TDRouter
@@ -71,6 +80,7 @@ extern double TouchDBVersionNumber; // Defined in generated TouchDB_vers.c
     [_path release];
     [_db release];
     [_changesFilter release];
+    [_onAccessCheck release];
     [_onResponseReady release];
     [_onDataAvailable release];
     [_onFinished release];
@@ -78,8 +88,9 @@ extern double TouchDBVersionNumber; // Defined in generated TouchDB_vers.c
 }
 
 
-@synthesize onResponseReady=_onResponseReady, onDataAvailable=_onDataAvailable,
-            onFinished=_onFinished, request=_request, response=_response;
+@synthesize onAccessCheck=_onAccessCheck, onResponseReady=_onResponseReady,
+            onDataAvailable=_onDataAvailable, onFinished=_onFinished,
+            request=_request, response=_response;
 
 
 - (NSDictionary*) queries {
@@ -141,7 +152,7 @@ extern double TouchDBVersionNumber; // Defined in generated TouchDB_vers.c
 
 - (NSDictionary*) bodyAsDictionary {
     return $castIf(NSDictionary, [TDJSON JSONObjectWithData: _request.HTTPBody
-                                                    options: 0 error: nil]);
+                                                    options: 0 error: NULL]);
 }
 
 
@@ -223,19 +234,25 @@ extern double TouchDBVersionNumber; // Defined in generated TouchDB_vers.c
 
 static NSArray* splitPath( NSURL* url ) {
     // Unfortunately can't just call url.path because that converts %2F to a '/'.
+#ifdef GNUSTEP
+    NSString* pathString = [url pathWithEscapes];
+#else
     NSString* pathString = NSMakeCollectable(CFURLCopyPath((CFURLRef)url));
+#endif
     NSMutableArray* path = $marray();
     for (NSString* comp in [pathString componentsSeparatedByString: @"/"]) {
         if ([comp length] > 0) {
-            comp = [comp stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
-            if (!comp) {
+            NSString* unescaped = [comp stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+            if (!unescaped) {
                 path = nil;     // bad URL
                 break;
             }
-            [path addObject: comp];
+            [path addObject: unescaped];
         }
     }
+#ifndef GNUSTEP
     [pathString release];
+#endif
     return path;
 }
 
@@ -343,7 +360,21 @@ static NSArray* splitPath( NSURL* url ) {
                @"TDRouter(Handlers) is missing -- app may be linked without -ObjC linker flag.");
         sel = @selector(do_UNKNOWN);
     }
+    
+    if (_onAccessCheck) {
+        TDStatus status = _onAccessCheck(_db, docID, sel);
+        if (TDStatusIsError(status)) {
+            LogTo(TDRouter, @"Access check failed for %@", _db.name);
+            return status;
+        }
+    }
+    
+#ifdef GNUSTEP
+    IMP fn = objc_msg_lookup(self, sel);
+    return (TDStatus) fn(self, sel, _db, docID, attachmentName);
+#else
     return (TDStatus) objc_msgSend(self, sel, _db, docID, attachmentName);
+#endif
 }
 
 
@@ -386,6 +417,13 @@ static NSArray* splitPath( NSURL* url ) {
         if (!_waiting) 
             [self finished];
     }
+    
+    // If I will keep running asynchronously (i.e. a _changes feed handler), listen for the
+    // database closing so I can stop then:
+    if (_running)
+        [[NSNotificationCenter defaultCenter] addObserver: self selector: @selector(dbClosing:)
+                                                     name: TDDatabaseWillCloseNotification
+                                                   object: _db];
 }
 
 
@@ -430,6 +468,16 @@ static NSArray* splitPath( NSURL* url ) {
 
 - (TDStatus) do_UNKNOWN {
     return kTDStatusBadRequest;
+}
+
+
+- (void) dbClosing: (NSNotification*)n {
+    LogTo(TDRouter, @"Database closing! Returning error 500");
+    if (_responseSent) {
+        _response.internalStatus = 500;
+        [self sendResponse];
+    }
+    [self finished];
 }
 
 
@@ -515,7 +563,7 @@ static NSArray* splitPath( NSURL* url ) {
                                                                       boundary: nil];
     for (id part in parts) {
         if (![part isKindOfClass: [NSData class]]) {
-            part = [TDJSON dataWithJSONObject: part options: 0 error: nil];
+            part = [TDJSON dataWithJSONObject: part options: 0 error: NULL];
             [mp setNextPartsHeaders: $dict({@"Content-Type", @"application/json"})];
         }
         [mp addData: part];

@@ -16,7 +16,7 @@
 #import "TDPuller.h"
 #import "TDDatabase+Insertion.h"
 #import "TDDatabase+Replication.h"
-#import "TDRevision.h"
+#import <TouchDB/TDRevision.h>
 #import "TDChangeTracker.h"
 #import "TDBatcher.h"
 #import "TDMultipartDownloader.h"
@@ -61,6 +61,8 @@ static NSString* joinQuotedEscaped(NSArray* strings);
 - (void) beginReplicating {
     Assert(!_changeTracker);
     if (!_downloadsToInsert) {
+        // Note: This is a ref cycle, because the block has a (retained) reference to 'self',
+        // and _downloadsToInsert retains the block, and of course I retain _downloadsToInsert.
         _downloadsToInsert = [[TDBatcher alloc] initWithCapacity: 200 delay: 1.0
                                                   processor: ^(NSArray *downloads) {
                                                       [self insertDownloads: downloads];
@@ -103,6 +105,14 @@ static NSString* joinQuotedEscaped(NSArray* strings);
     setObj(&_deletedRevsToPull, nil);
     setObj(&_bulkRevsToPull, nil);
     [super stop];
+    
+    [_downloadsToInsert flush];
+}
+
+
+- (void) stopped {
+    setObj(&_downloadsToInsert, nil);
+    [super stopped];
 }
 
 
@@ -111,6 +121,39 @@ static NSString* joinQuotedEscaped(NSArray* strings);
         return NO;
     [_changeTracker stop];
     return YES;
+}
+
+
+// TDChangeTrackerClient protocol
+- (NSString*) authorizationHeader {
+    if (!_authorizer)
+        return nil;
+    NSURL* url = _changeTracker.changesFeedURL;
+    NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL: url];
+    return [_authorizer authorizeURLRequest: request];
+}
+
+
+// TDChangeTrackerClient protocol
+- (NSURLCredential*) authCredential {
+    if (_authorizer)
+        return nil;
+    // It's unclear what value to use for 'realm' since we don't already have a challenge from
+    // the server. In practice, nil doesn't work (won't find existing Keychain passwords) while
+    // using the hostname does.
+    NSURL* url = _changeTracker.changesFeedURL;
+    NSURLProtectionSpace* space = [[[NSURLProtectionSpace alloc]
+                                                    initWithHost: url.host
+                                                            port: url.port.intValue
+                                                        protocol: NSURLProtectionSpaceHTTP
+                                                           realm: url.host
+                                            authenticationMethod: NSURLAuthenticationMethodDefault]
+                                   autorelease];
+    NSURLCredential* cred = [[NSURLCredentialStorage sharedCredentialStorage]
+                                                        defaultCredentialForProtectionSpace: space];
+    if (cred)
+        LogTo(Sync, @"%@ Using credential %@", self, cred);
+    return cred;
 }
 
 

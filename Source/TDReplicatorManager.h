@@ -6,7 +6,7 @@
 //  Copyright (c) 2012 Couchbase, Inc. All rights reserved.
 //
 
-#import "TDDatabase.h"
+#import <TouchDB/TDDatabase.h>
 @class TDDatabaseManager;
 
 
@@ -27,6 +27,7 @@ extern NSString* const kTDReplicatorDatabaseName;
 - (id) initWithDatabaseManager: (TDDatabaseManager*)dbManager;
 
 - (void) start;
+- (void) stop;
 
 /** Examines the JSON object describing a replication and determines the local database and remote URL, and some of the other parameters. */
 - (TDStatus) parseReplicatorProperties: (NSDictionary*)body

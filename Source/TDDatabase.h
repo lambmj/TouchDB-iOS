@@ -8,7 +8,7 @@
  */
 
 #import <TouchDB/TDRevision.h>
-#import "TDStatus.h"
+#import <TouchDB/TDStatus.h>
 @class FMDatabase, TDView, TDBlobStore;
 struct TDQueryOptions;      // declared in TDView.h
 
@@ -16,6 +16,9 @@ struct TDQueryOptions;      // declared in TDView.h
 /** NSNotification posted when a document is updated.
     The userInfo key "rev" has a TDRevision* as its value. */
 extern NSString* const TDDatabaseChangeNotification;
+
+/** NSNotification posted when a database is closing. */
+extern NSString* const TDDatabaseWillCloseNotification;
 
 
 /** Filter block, used in changes feeds and replication. */

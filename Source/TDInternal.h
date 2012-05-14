@@ -6,7 +6,7 @@
 //  Copyright (c) 2011 Couchbase, Inc. All rights reserved.
 //
 
-#import "TDDatabase.h"
+#import <TouchDB/TDDatabase.h>
 #import "TDDatabase+Attachments.h"
 #import "TDDatabaseManager.h"
 #import "TDView.h"
@@ -41,7 +41,9 @@
 
 @interface TDDatabase (Attachments_Internal)
 - (void) rememberAttachmentWritersForDigests: (NSDictionary*)writersByDigests;
-- (TDBlobStoreWriter*) attachmentWriterForAttachment: (NSDictionary*)attachment;
+#if DEBUG
+- (id) attachmentWriterForAttachment: (NSDictionary*)attachment;
+#endif
 - (BOOL) storeBlob: (NSData*)blob creatingKey: (TDBlobKey*)outKey;
 - (TDStatus) insertAttachment: (TDAttachment*)attachment
                   forSequence: (SequenceNumber)sequence;

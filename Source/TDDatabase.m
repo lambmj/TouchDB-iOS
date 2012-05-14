@@ -13,10 +13,10 @@
 //  either express or implied. See the License for the specific language governing permissions
 //  and limitations under the License.
 
-#import "TDDatabase.h"
+#import <TouchDB/TDDatabase.h>
 #import "TDDatabase+Attachments.h"
 #import "TDInternal.h"
-#import "TDRevision.h"
+#import <TouchDB/TDRevision.h>
 #import "TDCollateJSON.h"
 #import "TDBlobStore.h"
 #import "TDPuller.h"
@@ -25,6 +25,9 @@
 
 #import "FMDatabase.h"
 #import "FMDatabaseAdditions.h"
+
+
+NSString* const TDDatabaseWillCloseNotification = @"TDDatabaseWillClose";
 
 
 @implementation TDDatabase
@@ -42,10 +45,10 @@ static BOOL removeItemIfExists(NSString* path, NSError** outError) {
 
 
 + (TDDatabase*) createEmptyDBAtPath: (NSString*)path {
-    if (!removeItemIfExists(path, nil))
+    if (!removeItemIfExists(path, NULL))
         return nil;
     TDDatabase *db = [[[self alloc] initWithPath: path] autorelease];
-    if (!removeItemIfExists(db.attachmentStorePath, nil))
+    if (!removeItemIfExists(db.attachmentStorePath, NULL))
         return nil;
     if (![db open])
         return nil;
@@ -63,9 +66,9 @@ static BOOL removeItemIfExists(NSString* path, NSError** outError) {
 #if DEBUG
         _fmdb.logsErrors = YES;
 #else
-        _fmdb.logsErrors = WillLogTo(TouchDB);
+        _fmdb.logsErrors = WillLogTo(TDDatabase);
 #endif
-        _fmdb.traceExecution = WillLogTo(TouchDBVerbose);
+        _fmdb.traceExecution = WillLogTo(TDDatabaseVerbose);
     }
     return self;
 }
@@ -109,6 +112,7 @@ static BOOL removeItemIfExists(NSString* path, NSError** outError) {
 - (BOOL) open {
     if (_open)
         return YES;
+    LogTo(TDDatabase, @"Open %@", _path);
     if (![_fmdb open])
         return NO;
     
@@ -269,10 +273,13 @@ static BOOL removeItemIfExists(NSString* path, NSError** outError) {
     if (!_open)
         return NO;
     
+    LogTo(TDDatabase, @"Close %@", _path);
+    [[NSNotificationCenter defaultCenter] postNotificationName: TDDatabaseWillCloseNotification
+                                                        object: self];
     for (TDView* view in _views.allValues)
         [view databaseClosing];
     setObj(&_views, nil);
-    for (TDReplicator* repl in _activeReplicators)
+    for (TDReplicator* repl in [_activeReplicators.copy autorelease])
         [repl databaseClosing];
     setObj(&_activeReplicators, nil);
     
@@ -316,7 +323,7 @@ static BOOL removeItemIfExists(NSString* path, NSError** outError) {
 
 
 - (UInt64) totalDataSize {
-    NSDictionary* attrs = [[NSFileManager defaultManager] attributesOfItemAtPath: _path error: nil];
+    NSDictionary* attrs = [[NSFileManager defaultManager] attributesOfItemAtPath: _path error: NULL];
     if (!attrs)
         return 0;
     return attrs.fileSize + _attachments.totalDataSize;
@@ -477,7 +484,7 @@ static BOOL removeItemIfExists(NSString* path, NSError** outError) {
         return extra;      // optimization, and workaround for issue #44
     NSMutableDictionary* docProperties = [TDJSON JSONObjectWithData: json
                                                             options: TDJSONReadingMutableContainers
-                                                              error: nil];
+                                                              error: NULL];
     [docProperties addEntriesFromDictionary: extra];
     return docProperties;
 }

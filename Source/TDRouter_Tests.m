@@ -14,7 +14,7 @@
 //  and limitations under the License.
 
 #import "TDRouter.h"
-#import "TDDatabase.h"
+#import <TouchDB/TDDatabase.h>
 #import "TDBody.h"
 #import "TDServer.h"
 #import "TDBase64.h"
@@ -509,7 +509,7 @@ TestCase(TDRouter_PutMultipart) {
                               "Content-Type: text/plain\r\n\r\n"
                               "%@"
                               "\r\n--BOUNDARY--",
-                              [TDJSON stringWithJSONObject: props options: 0 error: nil],
+                              [TDJSON stringWithJSONObject: props options: 0 error: NULL],
                               attachmentString);
     
     TDResponse* response = SendRequest(server, @"PUT", @"/db/doc",
@@ -589,6 +589,41 @@ TestCase(TDRouter_RevsDiff) {
 }
 
 
+TestCase(TDRouter_AccessCheck) {
+    RequireTestCase(TDRouter_Databases);
+    TDDatabaseManager* server = createDBManager();
+    Send(server, @"PUT", @"/db", kTDStatusCreated, nil);
+    
+    NSURL* url = [NSURL URLWithString: @"touchdb:///db/"];
+    NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL: url];
+    request.HTTPMethod = @"GET";
+    TDRouter* router = [[[TDRouter alloc] initWithDatabaseManager: server request: request] autorelease];
+    CAssert(router!=nil);
+    __block BOOL calledOnAccessCheck = NO;
+    router.onAccessCheck = ^TDStatus(TDDatabase* accessDB, NSString* docID, SEL action) {
+        CAssert([accessDB.name isEqualToString: @"db"]);
+        calledOnAccessCheck = YES;
+        return 200;
+    };
+    [router start];
+    CAssert(calledOnAccessCheck);
+    CAssert(router.response.status == 200);
+    
+    router = [[[TDRouter alloc] initWithDatabaseManager: server request: request] autorelease];
+    CAssert(router!=nil);
+    calledOnAccessCheck = NO;
+    router.onAccessCheck = ^TDStatus(TDDatabase* accessDB, NSString* docID, SEL action) {
+        CAssert([accessDB.name isEqualToString: @"db"]);
+        calledOnAccessCheck = YES;
+        return 401;
+    };
+    [router start];
+    
+    CAssert(calledOnAccessCheck);
+    CAssert(router.response.status == 401);
+}
+
+
 TestCase(TDRouter) {
     RequireTestCase(TDRouter_Server);
     RequireTestCase(TDRouter_Databases);
@@ -597,6 +632,7 @@ TestCase(TDRouter) {
     RequireTestCase(TDRouter_ContinuousChanges);
     RequireTestCase(TDRouter_GetAttachment);
     RequireTestCase(TDRouter_RevsDiff);
+    RequireTestCase(TDRouter_AccessCheck);
 }
 
 #endif

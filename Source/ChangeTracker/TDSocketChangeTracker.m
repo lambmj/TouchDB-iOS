@@ -16,8 +16,14 @@
 // <http://wiki.apache.org/couchdb/HTTP_database_API#Changes>
 
 #import "TDSocketChangeTracker.h"
+#import "TDStatus.h"
 #import "TDBase64.h"
 #import "MYBlockUtils.h"
+#import "MYCertificateInfo.h"
+
+#import <string.h>
+#import <Security/SecCertificate.h>
+#import <Security/SecureTransport.h>
 
 
 // Values of _state:
@@ -44,13 +50,9 @@ enum {
                                      @"GET /%@/%@ HTTP/1.1\r\n"
                                      @"Host: %@\r\n",
                                 self.databaseName, self.changesFeedPath, _databaseURL.host];
-    NSURLCredential* credential = self.authCredential;
-    if (credential) {
-        NSString* auth = [NSString stringWithFormat: @"%@:%@",
-                          credential.user, credential.password];
-        auth = [TDBase64 encode: [auth dataUsingEncoding: NSUTF8StringEncoding]];
-        [request appendFormat: @"Authorization: Basic %@\r\n", auth];
-    }
+    NSString* auth = self.authorizationHeader;
+    if (auth)
+        [request appendFormat: @"Authorization: %@\r\n", auth];
     LogTo(ChangeTracker, @"%@: Starting with request:\n%@", self, request);
     [request appendString: @"\r\n"];
     _trackingRequest = [request copy];
@@ -61,7 +63,8 @@ enum {
         OS X 10.6.7, the delegate never receives any notification of a response. The workaround
         is to act as a dumb HTTP parser and do the job ourselves. */
     
-    int port = _databaseURL.port.unsignedShortValue ?: 80;
+    BOOL isSSL = (0 == [_databaseURL.scheme caseInsensitiveCompare: @"https"]);
+    int port = _databaseURL.port.unsignedShortValue ?: (isSSL ? 443 : 80);
 #if TARGET_OS_IPHONE
     CFReadStreamRef cfInputStream = NULL;
     CFWriteStreamRef cfOutputStream = NULL;
@@ -88,8 +91,30 @@ enum {
     _trackingOutput = [output retain];
 #endif
     
+    if (isSSL) {
+        [_trackingInput setProperty: NSStreamSocketSecurityLevelNegotiatedSSL
+                             forKey: NSStreamSocketSecurityLevelKey];
+        [_trackingOutput setProperty: NSStreamSocketSecurityLevelNegotiatedSSL
+                              forKey: NSStreamSocketSecurityLevelKey];  
+
+        // Disable peer name checking, because it will fail for certs with wildcard subdomains,
+        // in particular for IrisCouch whose cert is for "*.iriscouch.com". (SecureTransport bug?)
+        // TODO: FIXME: Add a manual hostname check after the connection opens!!!
+        // Also, disable TLS 1.2 support because it breaks compatibility with some SSL servers;
+        // workaround taken from Apple technote TN2287:
+        // http://developer.apple.com/library/ios/#technotes/tn2287/
+        NSDictionary *settings = $dict({(id)kCFStreamSSLPeerName, $null},
+                                       {(id)kCFStreamSSLLevel,
+                                        @"kCFStreamSocketSecurityLevelTLSv1_0SSLv3"});
+        CFReadStreamSetProperty((CFReadStreamRef)_trackingInput,
+                                kCFStreamPropertySSLSettings, (CFTypeRef)settings);
+        CFWriteStreamSetProperty((CFWriteStreamRef)_trackingOutput,
+                                 kCFStreamPropertySSLSettings, (CFTypeRef)settings);
+    }
+    
     _state = kStateStatus;
     _atEOF = _inputAvailable = _parsing = false;
+    _checkPeerName = isSSL;
     
     _inputBuffer = [[NSMutableData alloc] initWithCapacity: kReadLength];
     
@@ -100,6 +125,29 @@ enum {
     [_trackingInput scheduleInRunLoop: [NSRunLoop currentRunLoop] forMode: NSRunLoopCommonModes];
     [_trackingInput open];
     return YES;
+}
+
+
+static NSString* basicAuthString(NSString* username, NSString* password) {
+    if (!username || !password)
+        return nil;
+    NSString* auth = [NSString stringWithFormat: @"%@:%@", username, password];
+    auth = [TDBase64 encode: [auth dataUsingEncoding: NSUTF8StringEncoding]];
+    return [NSString stringWithFormat: @"Basic %@", auth];
+}
+
+
+- (NSString*) authorizationHeader {
+    NSString* auth = nil;
+    if ([_client respondsToSelector: @selector(authorizationHeader)])
+        auth = [_client authorizationHeader];
+    if (!auth)
+        auth = basicAuthString(_databaseURL.user, _databaseURL.password);
+    if (!auth) {
+        NSURLCredential* credential = self.authCredential;
+        auth = basicAuthString(credential.user, credential.password);
+    }
+    return auth;
 }
 
 
@@ -130,11 +178,88 @@ enum {
 }
 
 
+static NSString* peerCertName(NSInputStream* stream) {
+    SecTrustRef trust = (SecTrustRef) CFReadStreamCopyProperty((CFReadStreamRef)stream,
+                                                               kCFStreamPropertySSLPeerTrust);
+    if (!trust) {
+        Warn(@"Couldn't get SecTrust for %@", stream);
+        return nil;
+    }
+    SecCertificateRef cert = SecTrustGetCertificateAtIndex(trust, 0);
+    NSString* name;
+    
+#if 1 // Workaround for lack of SecCertificateCopyCommonName on iOS
+    CFDataRef certData = SecCertificateCopyData(cert);
+    NSError* err;
+    MYCertificateInfo* info = [[[MYCertificateInfo alloc] initWithCertificateData: (NSData*)certData
+                                                                            error: &err]
+                               autorelease];
+    CFRelease(certData);
+    name = info.subject.commonName;
+#else
+    CFStringRef cfName = NULL;
+    OSStatus err = SecCertificateCopyCommonName(cert, &cfName);
+    name = [NSMakeCollectable(cfName) autorelease];
+#endif
+    
+    CFRelease(trust);
+    if (err)
+        return nil;
+    return name;
+}
+
+static NSString* parentDomain(NSString* domain) {
+    NSRange dot = [domain rangeOfString: @"."];
+    if (dot.length == 0)
+        return @"";
+    return [domain substringFromIndex: NSMaxRange(dot)];
+}
+
+
+// Compares the name in the server's SSL cert against the hostname of the URL.
+// This shouldn't be necessary; SecureTransport should do this check for us. But if we let it,
+// it won't correctly match certs with wildcard subdomains (like "*.iriscouch.com"), so we
+// have to turn that checking off and do it ourselves. See, this is why we can't have nice things.
+- (BOOL) checkPeerName {
+    NSString* certName = peerCertName(_trackingInput);
+    NSString* hostName = _databaseURL.host;
+
+    BOOL result = NO;
+    if (0 == [certName caseInsensitiveCompare: hostName]) {
+        // exact match
+        result = YES;
+    } else if ([certName hasPrefix: @"*."]) {
+        // Cert has a wildcard subdomain; check if parent domains match:
+        result = (0 == [parentDomain(certName) caseInsensitiveCompare: parentDomain(hostName)]);
+    }
+    if (!result) {
+        Warn(@"%@: SSL name verification failed: expected '%@', cert has '%@'", 
+             self, hostName, certName);
+    }
+    return result;
+}
+
+
 - (BOOL) failUnparseable: (NSString*)line {
     Warn(@"Couldn't parse line from _changes: %@", line);
     [self setUpstreamError: @"Unparseable change line"];
     [self stop];
     return NO;
+}
+
+
+- (BOOL) readServerResponse: (NSString*)line {
+    int status;
+    NSScanner* scanner = [NSScanner scannerWithString: line];
+    if (![scanner scanString: @"HTTP/1.1 " intoString: nil] ||
+            ![scanner scanInt: &status]) {
+        return [self failUnparseable: line];
+    }
+    if (status >= 300) {
+        self.error = TDStatusToNSError(status, self.changesFeedURL);
+        return NO;
+    }
+    return YES;
 }
 
 
@@ -167,7 +292,7 @@ enum {
     BOOL keepGoing = YES;
     while (keepGoing && pos < end && _inputBuffer) {
         const char* lineStart = pos;
-        const char* crlf = strnstr(pos, "\r\n", end-pos);
+        const char* crlf = memmem(pos, end-pos, "\r\n", 2);
         if (!crlf)
             break;  // Wait till we have a complete line
         ptrdiff_t lineLength = crlf - pos;
@@ -183,9 +308,10 @@ enum {
         switch (_state) {
             case kStateStatus: {
                 // Read the HTTP response status line:
-                if (![line hasPrefix: @"HTTP/1.1 200 "])
-                    [self failUnparseable: line];
-                _state = kStateHeaders;
+                if ([self readServerResponse: line])
+                    _state = kStateHeaders;
+                else
+                    [self stop];
                 break;
             }
             case kStateHeaders:
@@ -303,6 +429,7 @@ enum {
 
 
 - (void) errorOccurred: (NSError*)error {
+    LogTo(ChangeTracker, @"%@: ErrorOccurred: %@", self, error);
     if (++_retryCount <= kMaxRetries) {
         [self clearConnection];
         NSTimeInterval retryDelay = kInitialRetryDelay * (1 << (_retryCount-1));
@@ -315,8 +442,19 @@ enum {
 }
 
 
-- (void) stream: (NSInputStream*)stream handleEvent: (NSStreamEvent)eventCode {
+- (void) stream: (NSStream*)stream handleEvent: (NSStreamEvent)eventCode {
     [[self retain] autorelease];  // Delegate calling -stop might otherwise dealloc me
+    
+    // Verify SSL peer name before first read or write:
+    if (eventCode == NSStreamEventHasSpaceAvailable || eventCode == NSStreamEventHasBytesAvailable) {
+        if (_checkPeerName && ![self checkPeerName]) {
+            [self errorOccurred: [NSError errorWithDomain: NSOSStatusErrorDomain
+                                                     code: errSSLHostNameMismatch
+                                                 userInfo: nil]];
+        }
+        _checkPeerName = NO;
+    }
+    
     switch (eventCode) {
         case NSStreamEventHasSpaceAvailable: {
             LogTo(ChangeTracker, @"%@: HasSpaceAvailable %@", self, stream);
@@ -342,11 +480,14 @@ enum {
         case NSStreamEventEndEncountered:
             LogTo(ChangeTracker, @"%@: EndEncountered %@", self, stream);
             _atEOF = true;
-            if (!_parsing)
+            if (_state < kStateChunks || _mode == kContinuous || _inputBuffer.length > 0)
+                [self errorOccurred: [NSError errorWithDomain: NSURLErrorDomain
+                                                         code: NSURLErrorNetworkConnectionLost
+                                                     userInfo: nil]];
+            else if (!_parsing)
                 [self stop];
             break;
         case NSStreamEventErrorOccurred:
-            LogTo(ChangeTracker, @"%@: ErrorOccurred %@: %@", self, stream, stream.streamError);
             [self errorOccurred: stream.streamError];
             break;
             
